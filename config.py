@@ -1,8 +1,9 @@
 import os
 import time
+from pathlib import Path
 
 # General Clean Up Paths and Configuration
-HOME = os.environ.get("USERPROFILE", r"C:\Users\Lucas")
+HOME = os.environ.get("USERPROFILE", str(Path.home()))
 APPD = os.path.join(HOME, "AppData")
 CUTOFF = time.time() - 365 * 24 * 3600
 BIG = 100 * 1024 * 1024

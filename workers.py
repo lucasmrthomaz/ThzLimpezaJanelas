@@ -12,17 +12,6 @@ class Cancelled(Exception):
     pass
 
 
-class _SizeWorker(QThread):
-    result = Signal(str, object)
-
-    def __init__(self, path):
-        super().__init__()
-        self.path = path
-
-    def run(self):
-        self.result.emit(self.path, dir_size(self.path))
-
-
 class ScanWorker(QThread):
     item = Signal(str, object, str)
     status = Signal(str)
@@ -54,11 +43,11 @@ class ScanWorker(QThread):
             elif self.kind == "LARGE_OLD":
                 self._scan_old()
         except Cancelled:
-            self.status.emit("Cancelado.")
-            return
-        self.done.emit()
+            self.status.emit("Cancelado pelo usuário.")
+        finally:
+            self.done.emit()
 
-    # USER / APPDATA — top-level entries, parallel dir sizes
+    # USER / APPDATA — top-level entries calculated sequentially in the background
     def _scan_root(self, root, skip_appdata):
         self.status.emit("Analisando diretórios...")
         self._check()
@@ -81,19 +70,16 @@ class ScanWorker(QThread):
 
         total = len(items)
         self.progress.emit(0, total)
-        subs = []
+        
         for i, e in enumerate(items):
             self._check()
             if e.is_dir(follow_symlinks=False):
-                w = _SizeWorker(e.path)
-                w.result.connect(lambda p, s: self.item.emit(p, s, ""))
-                subs.append(w)
-                w.start()
+                # Calcula sequencialmente (evita sobrecarga de threads concurrentes e I/O thrashing)
+                sz = dir_size(e.path)
+                self.item.emit(e.path, sz, "")
             elif e.is_file(follow_symlinks=False):
                 self.item.emit(e.path, e.stat().st_size, "")
             self.progress.emit(i + 1, total)
-        for w in subs:
-            w.wait()
         self.progress.emit(total, total)
 
     # EMPTY

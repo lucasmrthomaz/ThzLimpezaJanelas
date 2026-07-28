@@ -1,5 +1,9 @@
 import sys
 import os
+import faulthandler
+
+# Ativa o report de falhas (C-level errors) do Python para capturar erros do C++ (Qt)
+faulthandler.enable()
 
 # Garante que o diretório do script está no PATH do Python
 script_dir = os.path.dirname(os.path.abspath(__file__))
