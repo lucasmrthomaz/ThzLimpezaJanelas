@@ -18,15 +18,24 @@ def parse_size(text):
     return float(v) if v else 0
 
 
-def dir_size(root):
+def dir_size(root, check=None):
+    """Calcula o tamanho total de um diretório.
+
+    Se `check` for fornecido (callable), é chamado dentro do loop para
+    permitir cancelamento cooperativo (ex.: ScanWorker._check).
+    """
     total = 0
     try:
         stack = [root]
         while stack:
+            if check:
+                check()
             cur = stack.pop()
             try:
                 with os.scandir(cur) as it:
                     for e in it:
+                        if check:
+                            check()
                         try:
                             if e.is_dir(follow_symlinks=False):
                                 stack.append(e.path)

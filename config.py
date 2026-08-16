@@ -20,7 +20,7 @@ CACHE_PATTERNS = [
     'installer', 'installcache', '.npm', '.yarn', '.gradle', '.m2',
     '.cache', '.cargo', '__pycache__', 'node_modules',
     'code cache', 'serviceworker', 'session storage', 'local storage',
-    'blob_storage', 'webfonts', '.git'
+    'blob_storage', 'webfonts'
 ]
 
 KNOWN_CACHE = [

@@ -16,9 +16,14 @@ os.chdir(script_dir)
 from PySide6.QtWidgets import QApplication
 from window import Window
 
-if __name__ == "__main__":
+
+def run():
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
     w = Window()
     w.show()
     sys.exit(app.exec())
+
+
+if __name__ == "__main__":
+    run()

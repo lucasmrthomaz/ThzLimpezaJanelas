@@ -374,7 +374,10 @@ class TabPage(QWidget):
                             shutil.rmtree(p, ignore_errors=True)
                         else:
                             os.remove(p)
-                        ok += 1
+                        if not os.path.exists(p):
+                            ok += 1
+                        else:
+                            erros.append(f"{p}\nMotivo: restaurado/enquanto bloqueado")
                     except Exception as e:
                         erros.append(f"{p}\nMotivo: {e}")
                 if erros:
@@ -464,11 +467,14 @@ class TabPage(QWidget):
                             shutil.rmtree(path, ignore_errors=True)
                         else:
                             os.remove(path)
-                        index = self.tree.indexOfTopLevelItem(item)
-                        if index != -1:
-                            self.tree.takeTopLevelItem(index)
-                        self.lbl.setText("🗑️ Item excluído permanentemente.")
-                        self._recalc_and_emit()
+                        if not os.path.exists(path):
+                            index = self.tree.indexOfTopLevelItem(item)
+                            if index != -1:
+                                self.tree.takeTopLevelItem(index)
+                            self.lbl.setText("🗑️ Item excluído permanentemente.")
+                            self._recalc_and_emit()
+                        else:
+                            QMessageBox.warning(self, "Falha de exclusão", f"Não foi possível apagar: {path}")
                     except Exception as e:
                         QMessageBox.warning(self, "Falha de exclusão", f"Não foi possível apagar: {e}")
 

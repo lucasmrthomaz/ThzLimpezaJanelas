@@ -4,7 +4,7 @@ from PySide6.QtWidgets import (
 from theme import C, GLOBAL_QSS
 from config import CARD_CFG, TABS
 from widgets import StatCard, TabPage
-from utils import fmt, parse_size
+from utils import fmt
 
 
 class Window(QMainWindow):
@@ -16,6 +16,8 @@ class Window(QMainWindow):
         self.setStyleSheet(GLOBAL_QSS)
         self._pages = {}
         self._cards = {}
+        self._counts = {}
+        self._totals = {}
         self._build()
         QApplication.processEvents()
 
@@ -75,24 +77,15 @@ class Window(QMainWindow):
                 break
 
     def _on_scan(self, kind, count, total):
+        self._counts[kind] = count
+        self._totals[kind] = total
         c = self._cards.get(kind)
         if c:
             c.set(f"{count} itens" if count else "0",
                   fmt(total) if total else "0 B")
-        # Recalcular somatório total de todas as abas
-        all_n = 0
-        all_sz = 0
-        for k, p in self._pages.items():
-            t = p.tree
-            for i in range(t.topLevelItemCount()):
-                item = t.topLevelItem(i)
-                if item:
-                    try:
-                        sz_txt = item.text(1)
-                        all_n += 1
-                        all_sz += parse_size(sz_txt)
-                    except Exception:
-                        pass
+        # Totais acumulados por aba (sem re-varrer as árvores)
+        all_n = sum(self._counts.values())
+        all_sz = sum(self._totals.values())
         self._card_total.set(fmt(all_sz) if all_sz else "0 B",
                              f"{all_n} itens")
 
@@ -105,7 +98,7 @@ class Window(QMainWindow):
             try:
                 if page.worker and page.worker.isRunning():
                     page.worker.abort()
-                    page.worker.wait() # Aguarda a thread fechar de forma limpa
+                    page.worker.wait(2000) # Timeout evita travar o fechamento
             except Exception:
                 pass
                 

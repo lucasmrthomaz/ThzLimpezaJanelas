@@ -21,13 +21,21 @@ Cleaner do perfil Windows (`C:\Users\Lucas`) para remover lixo do sistema: pasta
 
 ```
 ThzLimpezaJanelas/
-  app_limpeza.py     # Aplicação completa (~627 linhas)
-  AGENTS.md          # Este documento (contexto para novas conversas)
+  main.py        # Entry point (define run(); orquestra QApplication)
+  main.pyw       # Execução sem console — delega para main.run()
+  config.py      # Constantes: HOME, APPD, SKIP_DIRS, CACHE_PATTERNS, KNOWN_CACHE, CARD_CFG, TABS
+  utils.py       # fmt, parse_size, dir_size
+  theme.py       # Detecção claro/escuro e construção do QSS global
+  workers.py     # ScanWorker (QThread) — varreduras em thread separada
+  widgets.py     # StatCard, SizeWidgetItem, TabPage
+  window.py      # Window (QMainWindow) — dashboard + abas + status
+  Iniciar.bat    # Atalho: python main.py
+  AGENTS.md      # Este documento (contexto para novas conversas)
 ```
 
 ---
 
-## Constantes Globais (`app_limpeza.py`)
+## Constantes Globais (`config.py`)
 
 ### `SKIP_DIRS` — `frozenset`
 Diretórios do sistema ignorados em TODAS as varreduras (case-insensitive):
@@ -76,9 +84,10 @@ Formata bytes para string legível: `0 B`, `1.5 KB`, `3.2 MB`, `1.8 GB`, `2.4 TB
 ### `parse_size(text: str) -> float`
 Interpreta o texto formatado de volta para bytes. Ex: `"1.5 MB"` → `1572864.0`
 
-### `dir_size(root: str) -> int`
+### `dir_size(root: str, check=None) -> int`
 Calcula tamanho total recursivo de um diretório usando **pilha iterativa** (stack) + `os.scandir`. Evita recursão profunda e syscalls extras.
 - `follow_symlinks=False` — não segue junctions do Windows
+- `check` (callable opcional) é chamado dentro do loop para cancelamento cooperativo — o `ScanWorker` passa `self._check`
 - Engole `PermissionError` e `OSError` silenciosamente
 
 ---
@@ -87,17 +96,6 @@ Calcula tamanho total recursivo de um diretório usando **pilha iterativa** (sta
 
 ### `Cancelled(Exception)`
 Exceção usada internamente pelos workers para interromper a varredura quando o usuário clica em "Cancelar".
-
----
-
-### `_SizeWorker(QThread)`
-Worker auxiliar para calcular tamanho de UM diretório em paralelo.
-
-| Signal | Tipo | Descrição |
-|---|---|---|
-| `result` | `Signal(str, object)` | `(path, size_bytes)` |
-
-**Uso**: Criado múltiplas vezes no `ScanWorker._scan_root()` para calcular tamanho de cada subdiretório concorrentemente.
 
 ---
 
@@ -126,18 +124,18 @@ Worker principal. Executa a varredura de acordo com `self.kind` em uma thread se
 
 | kind | Método | Descrição |
 |---|---|---|
-| `USER` | `_scan_root(HOME, skip_appdata=True)` | Top-level items do perfil com `_SizeWorker` paralelo |
-| `APPDATA` | `_scan_root(APPD, skip_appdata=False)` | Top-level items da AppData com `_SizeWorker` paralelo |
+| `USER` | `_scan_root(HOME, skip_appdata=True)` | Top-level items do perfil |
+| `APPDATA` | `_scan_root(APPD, skip_appdata=False)` | Top-level items da AppData |
 | `EMPTY` | `_scan_empty()` | Caminha HOME + APPD com pilha, emite pastas sem filhos (vazias) |
 | `CACHE` | `_scan_cache()` | 1. Verifica `KNOWN_CACHE` (paths fixos); 2. `_find_caches()` dinâmico até depth 3 |
 | `LARGE_OLD` | `_scan_old()` | Caminha HOME, emite arquivos com `size >= BIG` e `mtime < CUTOFF` |
 
 #### Detalhes do `_scan_root`
 - Coleta entradas com `os.scandir`
-- Para cada diretório: cria `_SizeWorker` e inicia em paralelo
+- Para cada diretório: calcula `dir_size` **sequencialmente** (evita thrashing de I/O com múltiplas threads concorrentes)
 - Para cada arquivo: emite `item(path, size, "")` diretamente
 - Emite `progress(i+1, total)` no loop
-- Aguarda todos `_SizeWorker` com `w.wait()`
+- `dir_size` recebe `self._check` para permitir cancelamento cooperativo
 
 ---
 
@@ -314,12 +312,10 @@ Detectado automaticamente via registro do Windows em `_detect_dark()`:
 [ScanWorker thread]                    [Main thread]
                                         
 _scan_root()                           
-  ├─ _SizeWorker.start()
-  │   └─ result.emit(path, size)       
+  ├─ dir_size(e.path, self._check)      # cálculo sequencial do diretório
+  │   └─ item.emit(path, size)
   │       └─ (queued)                  
-  │           └─ ScanWorker.item.emit()
-  │               └─ (direct)          
-  │                   └─ TabPage._add()
+  │           └─ TabPage._add()
   │                       └─ TreeView.add() → checkable item
   │                                     
   └─ done.emit()
@@ -339,8 +335,10 @@ _scan_root()
 ## Como Executar
 
 ```powershell
-python app_limpeza.py
+python main.py
 ```
+
+Ou via `Iniciar.bat` / `main.pyw` para executar sem console.
 
 Dependências (já instaladas):
 ```powershell
@@ -354,14 +352,14 @@ pip install PySide6 send2trash
 ### I/O
 - `os.scandir` em vez de `os.walk`/`os.listdir` — retorna `stat` sem syscall extra
 - Traversal iterativo (stack) — sem overhead de recursão Python
-- `_SizeWorker` paralelos para cálculo simultâneo de diretórios (USER/APPDATA)
+- `dir_size` sequencial (evita thrashing de I/O com threads concorrentes)
 - `follow_symlinks=False` — evita seguir junctions do Windows
 - Empty scan para no **primeiro filho** encontrado (early break)
 
 ### Threading
 - Cada aba tem seu próprio `ScanWorker` rodando em `QThread` independente
 - Várias abas podem escanear simultaneamente
-- `_SizeWorker` usa threads separadas para calcular tamanho de diretórios em paralelo
+- `dir_size` recebe `self._check` para cancelamento cooperativo dentro do loop
 
 ---
 
@@ -372,8 +370,8 @@ pip install PySide6 send2trash
 | Startup crash: `ValueError: not enough values to unpack` | `CARD_CFG` com tuplas de 3 elementos, loop esperava 4 | Separar icon do label: `(key, icon, label, color)` |
 | `OverflowError` com tamanhos >2GB | Signal usava `int` (32-bit C int) | Mudar para `object` nos parâmetros de tamanho: `Signal(str, object, str)` |
 | Checkbox não aparecia | `setCheckState` depois de `setText` + stylesheet `QTreeWidget::item` interferindo | Flags antes de setters + remover `QTreeWidget::item{padding}` |
-| Startup lenta (~1s+) | `app.setStyle("Fusion")` carregava engine extra | Remover setStyle, usar tema nativo Windows |
-| Classe `_SizeWorker` duplicada | Duas definições no mesmo arquivo | Remover a segunda definição |
+| SetStyle Fusion reduz a barra de título | Usar tema nativo do Windows | Manter `app.setStyle("Fusion")` opcional **ou** remover para barra nativa; verificar visualmente |
+| Classe `_SizeWorker` (paralela) referida na doc | Doc registrava worker que não existe mais | `dir_size` é sequencial; remover menções a `_SizeWorker` |
 | Checkbox invisível (branco sobre branco) | Nenhum estilo visual no indicador | `QTreeWidget::indicator:checked` com fundo azul + `:unchecked` com borda cinza |
 | Seleção "confusa" — clique no texto não marca | `itemClicked` não conectado | `_toggle_item()` — clique em col 1+ alterna checkbox; col 0 deixa nativo do Qt |
 
@@ -402,7 +400,7 @@ r'Local\MeuApp\Cache',
 ### Testando
 - Não há test suite formal. Testar manualmente:
   ```powershell
-  python app_limpeza.py
+  python main.py
   ```
 - Verificar: startup sem erros, scan em cada aba, checkboxes, cancelamento, deleção
 

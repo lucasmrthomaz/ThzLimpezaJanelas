@@ -75,7 +75,7 @@ class ScanWorker(QThread):
             self._check()
             if e.is_dir(follow_symlinks=False):
                 # Calcula sequencialmente (evita sobrecarga de threads concurrentes e I/O thrashing)
-                sz = dir_size(e.path)
+                sz = dir_size(e.path, self._check)
                 self.item.emit(e.path, sz, "")
             elif e.is_file(follow_symlinks=False):
                 self.item.emit(e.path, e.stat().st_size, "")
@@ -98,11 +98,10 @@ class ScanWorker(QThread):
                         with os.scandir(cur) as it:
                             for e in it:
                                 n = e.name.lower()
-                                if n in SKIP_DIRS:
-                                    continue
-                                empty = False
                                 if e.is_dir(follow_symlinks=False):
-                                    stack.append(e.path)
+                                    if n not in SKIP_DIRS:
+                                        stack.append(e.path)
+                                empty = False
                         if empty:
                             self.item.emit(cur, 0, "Vazia")
                     except (PermissionError, OSError):
@@ -118,7 +117,7 @@ class ScanWorker(QThread):
             self._check()
             t = base / rel
             if t.exists():
-                sz = dir_size(str(t))
+                sz = dir_size(str(t), self._check)
                 self.item.emit(str(t), sz, f"Cache: {t.name}")
 
         self.status.emit("Buscando pastas de cache por nome...")
@@ -135,7 +134,7 @@ class ScanWorker(QThread):
                         continue
                     n = e.name.lower()
                     if any(p in n for p in CACHE_PATTERNS):
-                        sz = dir_size(e.path)
+                        sz = dir_size(e.path, self._check)
                         self.item.emit(e.path, sz, "Cache/Temp")
                     else:
                         self._find_caches(e.path, depth + 1)
@@ -162,7 +161,7 @@ class ScanWorker(QThread):
                                 if st.st_size >= BIG and st.st_mtime < CUTOFF:
                                     d = datetime.fromtimestamp(st.st_mtime).strftime("%d/%m/%Y")
                                     self.item.emit(e.path, st.st_size, f"Mod: {d}")
-                            elif e.is_dir(follow_symlinks=False) and n not in SKIP_DIRS:
+                            elif e.is_dir(follow_symlinks=False):
                                 stack.append(e.path)
                         except (PermissionError, OSError):
                             pass
