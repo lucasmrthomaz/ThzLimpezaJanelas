@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+
+build/
+dist/
+dist-nuitka/
+*.spec
+main.build/
+main.dist/
+main.onefile-build/
+main.env/
+*.bin

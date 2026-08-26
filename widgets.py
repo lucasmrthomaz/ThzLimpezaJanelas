@@ -1,17 +1,15 @@
 import os
-import shutil
-import send2trash
 import subprocess
 from PySide6.QtCore import Qt, Signal, QTimer
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QTreeWidget, QTreeWidgetItem,
     QPushButton, QLabel, QProgressBar, QMessageBox, QFrame, QSizePolicy,
-    QStyle, QApplication, QMenu
+    QStyle, QApplication, QMenu, QLineEdit
 )
-from PySide6.QtGui import QColor, QAction
+from PySide6.QtGui import QColor, QAction, QShortcut, QKeySequence
 from theme import C, BTN, BTN_GRAY, BTN_RED, BTN_OUT
-from utils import fmt, parse_size
-from workers import ScanWorker
+from utils import fmt
+from workers import ScanWorker, DeleteWorker
 
 
 class SizeWidgetItem(QTreeWidgetItem):
@@ -101,9 +99,12 @@ class TabPage(QWidget):
         super().__init__(parent)
         self.kind = kind
         self.worker = None
+        self._del_worker = None
+        self._is_busy = False
         self._item_buffer = []
         self._timer = None
         self._setup()
+        self._setup_shortcuts()
 
     def _setup(self):
         lo = QVBoxLayout(self)
@@ -137,6 +138,16 @@ class TabPage(QWidget):
         bar.addSpacing(10)
         bar.addWidget(self.b_del)
         bar.addStretch()
+        self.sel_lbl = QLabel("")
+        self.sel_lbl.setStyleSheet(f'color:{C["blue"]};font-size:11px;font-weight:700;border:none')
+        bar.addWidget(self.sel_lbl)
+        bar.addSpacing(8)
+        self.filter = QLineEdit()
+        self.filter.setPlaceholderText("🔍 Filtrar...")
+        self.filter.setClearButtonEnabled(True)
+        self.filter.setFixedWidth(200)
+        self.filter.textChanged.connect(self._apply_filter)
+        bar.addWidget(self.filter)
         lo.addLayout(bar)
 
         row = QHBoxLayout()
@@ -169,13 +180,20 @@ class TabPage(QWidget):
         )
         self.tree.itemClicked.connect(self._toggle_item)
         self.tree.itemDoubleClicked.connect(self._open_item_location)
+        self.tree.itemChanged.connect(self._on_item_changed)
         self.tree.setContextMenuPolicy(Qt.CustomContextMenu)
         self.tree.customContextMenuRequested.connect(self._show_context_menu)
         lo.addWidget(self.tree, 1)
 
+    def _setup_shortcuts(self):
+        QShortcut(QKeySequence("F5"), self).activated.connect(self.start)
+        QShortcut(QKeySequence("Ctrl+A"), self.tree).activated.connect(self._sel_all)
+        QShortcut(QKeySequence("Del"), self.tree).activated.connect(self._delete_checked)
+
     # ── API ───────────────────────────────────────────────────────
 
     def _enable(self, busy):
+        self._is_busy = busy
         self.b_scan.setEnabled(not busy)
         self.b_cancel.setEnabled(busy)
         self.b_sel.setEnabled(not busy)
@@ -183,7 +201,7 @@ class TabPage(QWidget):
         self.b_del.setEnabled(not busy and self.tree.topLevelItemCount() > 0)
 
     def start(self):
-        if self.worker and self.worker.isRunning():
+        if self._is_busy:
             return
         
         # Limpa temporizador antigo se houver ativo
@@ -195,6 +213,7 @@ class TabPage(QWidget):
             self._timer = None
 
         self.tree.clear()
+        self.sel_lbl.setText("")
         self.prog.setRange(0, 0)
         self.prog.show()
         self._enable(True)
@@ -222,10 +241,47 @@ class TabPage(QWidget):
         self.worker.start()
 
     def _cancel(self):
+        if self._del_worker and self._del_worker.isRunning():
+            self._del_worker.abort()
+            self.b_cancel.setEnabled(False)
+            self.lbl.setText("⏳ Cancelando exclusão...")
+            return
         if self.worker and self.worker.isRunning():
             self.worker.abort()
             self.b_cancel.setEnabled(False)
             self.lbl.setText("⏳ Cancelando...")
+
+    def _apply_filter(self, text):
+        t = text.strip().lower()
+        for i in range(self.tree.topLevelItemCount()):
+            item = self.tree.topLevelItem(i)
+            if item:
+                item.setHidden(bool(t) and t not in item.text(0).lower())
+
+    def _has_checked(self):
+        for i in range(self.tree.topLevelItemCount()):
+            item = self.tree.topLevelItem(i)
+            if item and not item.isHidden() and item.checkState(0) == Qt.Checked:
+                return True
+        return False
+
+    def _delete_checked(self):
+        if not self._is_busy and self._has_checked():
+            self._delete()
+
+    def _on_item_changed(self, item, column):
+        if column == 0 and not self.tree.signalsBlocked():
+            self._update_sel_info()
+
+    def _update_sel_info(self):
+        n = 0
+        total = 0
+        for i in range(self.tree.topLevelItemCount()):
+            item = self.tree.topLevelItem(i)
+            if item and not item.isHidden() and item.checkState(0) == Qt.Checked:
+                n += 1
+                total += item.data(1, Qt.UserRole) or 0
+        self.sel_lbl.setText(f"☑ {n} selecionado(s) | {fmt(total)}" if n else "")
 
     def _toggle_item(self, item, column):
         if not item:
@@ -305,39 +361,51 @@ class TabPage(QWidget):
         self.tree.sortByColumn(1, Qt.DescendingOrder)
 
         c = self.tree.topLevelItemCount()
-        total = sum(parse_size(self.tree.topLevelItem(i).text(1))
-                    for i in range(c) if self.tree.topLevelItem(i) is not None)
-                    
+        total = sum(self.tree.topLevelItem(i).data(1, Qt.UserRole) or 0
+                    for i in range(c))
+
         # Exibe status condicional ao cancelamento
         if self.worker and self.worker._abort:
             self.lbl.setText("⏹️ Escaneamento cancelado pelo usuário.")
         else:
             self.lbl.setText(f"✅ {c} itens encontrados | total {fmt(total)}")
-            
+
         self.scanned.emit(self.kind, c, total)
+        self._update_sel_info()
 
     def _sel_all(self):
-        for i in range(self.tree.topLevelItemCount()):
-            item = self.tree.topLevelItem(i)
-            if item:
-                item.setCheckState(0, Qt.Checked)
+        self.tree.blockSignals(True)
+        try:
+            for i in range(self.tree.topLevelItemCount()):
+                item = self.tree.topLevelItem(i)
+                if item:
+                    item.setCheckState(0, Qt.Checked)
+        finally:
+            self.tree.blockSignals(False)
+        self._update_sel_info()
 
     def _desel_all(self):
-        for i in range(self.tree.topLevelItemCount()):
-            item = self.tree.topLevelItem(i)
-            if item:
-                item.setCheckState(0, Qt.Unchecked)
+        self.tree.blockSignals(True)
+        try:
+            for i in range(self.tree.topLevelItemCount()):
+                item = self.tree.topLevelItem(i)
+                if item:
+                    item.setCheckState(0, Qt.Unchecked)
+        finally:
+            self.tree.blockSignals(False)
+        self._update_sel_info()
 
     def _delete(self):
+        if self._is_busy:
+            return
         paths = []
         total = 0
         for i in range(self.tree.topLevelItemCount()):
             item = self.tree.topLevelItem(i)
-            if item:
-                if item.checkState(0) == Qt.Checked:
-                    paths.append(item.data(0, Qt.UserRole))
-                    total += parse_size(item.text(1))
-        
+            if item and item.checkState(0) == Qt.Checked:
+                paths.append(item.data(0, Qt.UserRole))
+                total += item.data(1, Qt.UserRole) or 0
+
         if not paths:
             QMessageBox.information(self, "Vazio", "Nada selecionado.")
             return
@@ -348,45 +416,48 @@ class TabPage(QWidget):
                 QMessageBox.Yes | QMessageBox.No) != QMessageBox.Yes:
             return
 
-        ok = 0
-        failed_trash = []
-        
-        # 1. Enviar para lixeira
-        for p in paths:
-            try:
-                send2trash.send2trash(p)
-                ok += 1
-            except Exception:
-                failed_trash.append(p)
+        self._del_ok = 0
+        self._del_total = len(paths)
+        self._start_delete_phase(paths, permanent=False)
 
-        # 2. Perguntar exclusão permanente sob os que falharam (uma única vez)
-        if failed_trash:
-            res = QMessageBox.question(self, "Limpeza de itens bloqueados",
-                f"{len(failed_trash)} item(ns) não puderam ser enviados para a lixeira (provavelmente em uso ou pastas de sistema protegidas).\n\n"
-                "Deseja tentar excluí-los permanentemente de forma direta?",
-                QMessageBox.Yes | QMessageBox.No)
-            
-            if res == QMessageBox.Yes:
-                erros = []
-                for p in failed_trash:
-                    try:
-                        if os.path.isdir(p):
-                            shutil.rmtree(p, ignore_errors=True)
-                        else:
-                            os.remove(p)
-                        if not os.path.exists(p):
-                            ok += 1
-                        else:
-                            erros.append(f"{p}\nMotivo: restaurado/enquanto bloqueado")
-                    except Exception as e:
-                        erros.append(f"{p}\nMotivo: {e}")
-                if erros:
-                    QMessageBox.warning(self, "Falha na exclusão permanente",
-                        f"{len(erros)} item(ns) ainda continuam protegidos e não puderam ser excluídos:\n\n"
-                        + "\n---\n".join(erros[:5])
-                        + ("\n..." if len(erros) > 5 else ""))
+    def _start_delete_phase(self, paths, permanent):
+        self._enable(True)
+        self.lbl.setText("🗑 Enviando para a lixeira..." if not permanent
+                         else "🗑 Excluindo permanentemente...")
+        self.prog.setRange(0, len(paths))
+        self.prog.setValue(0)
+        self.prog.show()
+        self._del_worker = DeleteWorker(paths, permanent=permanent)
+        self._del_worker.progress.connect(self.prog.setValue)
+        self._del_worker.done_phase.connect(
+            lambda ok, failed, perm=permanent: self._after_delete_phase(ok, failed, perm))
+        self._del_worker.start()
 
-        QMessageBox.information(self, "Limpeza concluída", f"{ok} de {len(paths)} itens removidos com sucesso.")
+    def _after_delete_phase(self, ok, failed, permanent):
+        aborted = getattr(self._del_worker, "_abort", False)
+        self._del_ok += ok
+        if not aborted and failed:
+            if permanent:
+                QMessageBox.warning(self, "Falha na exclusão permanente",
+                    f"{len(failed)} item(ns) continuam protegidos e não puderam ser excluídos:\n\n"
+                    + "\n---\n".join(failed[:5])
+                    + ("\n..." if len(failed) > 5 else ""))
+            else:
+                res = QMessageBox.question(self, "Itens bloqueados",
+                    f"{len(failed)} item(ns) não puderam ser enviados para a lixeira "
+                    "(provavelmente em uso ou protegidos pelo sistema).\n\n"
+                    "Deseja tentar excluí-los permanentemente?",
+                    QMessageBox.Yes | QMessageBox.No)
+                if res == QMessageBox.Yes:
+                    self._start_delete_phase(failed, permanent=True)
+                    return
+        self._finish_delete()
+
+    def _finish_delete(self):
+        self.prog.hide()
+        self._enable(False)
+        QMessageBox.information(self, "Limpeza concluída",
+            f"{self._del_ok} de {self._del_total} itens removidos com sucesso.")
         self.start()
 
     # ── Context Menu e Ações ──────────────────────────────────────
@@ -442,43 +513,71 @@ class TabPage(QWidget):
         self.lbl.setText("📋 Caminho copiado para a área de transferência!")
 
     def _delete_single_item(self, item):
-        if not item:
+        if not item or self._is_busy:
             return
         path = item.data(0, Qt.UserRole)
         res = QMessageBox.question(self, "Deletar item",
             f"Deseja enviar este item para a Lixeira?\n\n{path}",
             QMessageBox.Yes | QMessageBox.No)
-        
-        if res == QMessageBox.Yes:
-            try:
-                send2trash.send2trash(path)
-                index = self.tree.indexOfTopLevelItem(item)
-                if index != -1:
-                    self.tree.takeTopLevelItem(index)
-                self.lbl.setText("🗑️ Item enviado para a lixeira.")
-                self._recalc_and_emit()
-            except Exception:
-                res2 = QMessageBox.question(self, "Impossível enviar para lixeira",
-                    "Falha ao enviar para a lixeira. Deseja deletar permanentemente?",
-                    QMessageBox.Yes | QMessageBox.No)
-                if res2 == QMessageBox.Yes:
-                    try:
-                        if os.path.isdir(path):
-                            shutil.rmtree(path, ignore_errors=True)
-                        else:
-                            os.remove(path)
-                        if not os.path.exists(path):
-                            index = self.tree.indexOfTopLevelItem(item)
-                            if index != -1:
-                                self.tree.takeTopLevelItem(index)
-                            self.lbl.setText("🗑️ Item excluído permanentemente.")
-                            self._recalc_and_emit()
-                        else:
-                            QMessageBox.warning(self, "Falha de exclusão", f"Não foi possível apagar: {path}")
-                    except Exception as e:
-                        QMessageBox.warning(self, "Falha de exclusão", f"Não foi possível apagar: {e}")
+        if res != QMessageBox.Yes:
+            return
+        self._single_item = item
+        self._enable(True)
+        self.lbl.setText("🗑 Enviando para a lixeira...")
+        self.prog.setRange(0, 0)
+        self.prog.show()
+        self._del_worker = DeleteWorker([path])
+        self._del_worker.done_phase.connect(self._after_single_delete)
+        self._del_worker.start()
+
+    def _after_single_delete(self, ok, failed):
+        item = getattr(self, "_single_item", None)
+        self.prog.hide()
+        self._enable(False)
+        if ok and item:
+            self._remove_tree_item(item)
+            self.lbl.setText("🗑️ Item enviado para a lixeira.")
+            self._recalc_and_emit()
+            return
+        if not failed:
+            return
+        path = item.data(0, Qt.UserRole) if item else None
+        if not path:
+            return
+        res2 = QMessageBox.question(self, "Impossível enviar para lixeira",
+            "Falha ao enviar para a lixeira. Deseja deletar permanentemente?",
+            QMessageBox.Yes | QMessageBox.No)
+        if res2 == QMessageBox.Yes:
+            self._enable(True)
+            self.lbl.setText("🗑 Excluindo permanentemente...")
+            self.prog.setRange(0, 0)
+            self.prog.show()
+            self._del_worker = DeleteWorker([path], permanent=True)
+            self._del_worker.done_phase.connect(self._after_single_permanent)
+            self._del_worker.start()
+
+    def _after_single_permanent(self, ok, failed):
+        item = getattr(self, "_single_item", None)
+        self.prog.hide()
+        self._enable(False)
+        if ok and item:
+            self._remove_tree_item(item)
+            self.lbl.setText("🗑️ Item excluído permanentemente.")
+            self._recalc_and_emit()
+        else:
+            QMessageBox.warning(self, "Falha de exclusão", "Não foi possível apagar o item.")
+
+    def _remove_tree_item(self, item):
+        try:
+            index = self.tree.indexOfTopLevelItem(item)
+        except RuntimeError:
+            return
+        if index != -1:
+            self.tree.takeTopLevelItem(index)
 
     def _recalc_and_emit(self):
         c = self.tree.topLevelItemCount()
-        total = sum(parse_size(self.tree.topLevelItem(i).text(1)) for i in range(c) if self.tree.topLevelItem(i) is not None)
+        total = sum(self.tree.topLevelItem(i).data(1, Qt.UserRole) or 0
+                    for i in range(c))
         self.scanned.emit(self.kind, c, total)
+        self._update_sel_info()

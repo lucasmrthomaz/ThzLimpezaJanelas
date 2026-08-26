@@ -1,0 +1,4 @@
+pillow>=10.0
+pyinstaller>=6.0
+nuitka>=2.8
+zstandard>=0.22

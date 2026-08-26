@@ -20,6 +20,9 @@ A aplicação conta com um painel superior reativo (dashboard) e uma estrutura d
 * **📭 Pastas Vazias**: Varre recursivamente diretórios e aponta de forma instantânea pastas sem nenhum conteúdo útil.
 * **🗑️ Cache e Temporários**: Localiza armazenamentos temporários conhecidos (Chrome, Edge, Spotify, Discord, Windows Temp, Log, Pip, Npm, etc.) e busca caches baseados em nome.
 * **⚠️ Arquivos +1 ano (100MB+)**: Localiza arquivos pesados acumulados no disco que não sofreram nenhuma modificação no último ano.
+* **🔧 Dev Junk**: Detecta pastas de desenvolvimento como `node_modules`, `__pycache__`, `.git`, `dist`, `build`, `.venv`, `coverage`, etc.
+* **📥 Downloads Antigos**: Lista arquivos na pasta Downloads com mais de 30 dias sem acesso.
+* **📋 Logs**: Localiza pastas de logs do sistema e aplicativos, além de arquivos `.log` espalhados pelo perfil.
 
 ---
 
@@ -59,9 +62,21 @@ cd ThzLimpezaJanelas
 
 ### 2. Instalar Dependências Necessárias:
 A aplicação requer as seguintes dependências externas (`PySide6` para visual e `send2trash` para exclusão sem perdas):
+
+**Opção 1 - Script automático (recomendado):**
 ```bash
-pip install PySide6 send2trash
+# Windows (duplo clique):
+Instalar.bat
+
+# PowerShell:
+.\instalar.ps1
 ```
+
+**Opção 2 - Manual:**
+```bash
+pip install -r requirements.txt
+```
+
 *(Se estiver utilizando o interpretador do Microsoft Windows Store, instale via `python -m pip install PySide6 send2trash --user`)*
 
 ### 3. Iniciar a Aplicação:
@@ -71,6 +86,38 @@ pip install PySide6 send2trash
   ```
 * **No Windows (Interface gráfica direta)**:
   Dê dois cliques no inicializador **`Iniciar.bat`** (ou direto em **`main.pyw`**). A ferramenta será carregada em silêncio e aberta na sua tela sem abrir console/linhas de comando adicionais do terminal.
+
+---
+
+## 📦 Gerando o Executável (.exe sem Python)
+
+O projeto gera um executável **portátil de arquivo único** (não requer Python instalado na máquina do usuário). Dois empacotadores são suportados:
+
+### Pré-requisitos (apenas na máquina de build):
+```bash
+pip install -r requirements-dev.txt
+```
+
+### Opção 1 — PyInstaller (~45 MB):
+```bash
+# Duplo clique ou PowerShell:
+.\build_pyinstaller.bat
+# Saída: dist\ThzLimpezaJanelas.exe
+```
+
+### Opção 2 — Nuitka (compilação nativa, ~22 MB):
+```bash
+# Primeira execução baixa o compilador C automaticamente; build leva vários minutos.
+.\build_nuitka.bat
+# Saída: dist-nuitka\ThzLimpezaJanelas.exe
+```
+
+### Notas:
+* Ambos os scripts limpam `__pycache__` antes de empacotar — **não remova esse passo**: bytecode obsoleto no cache já causou um exe com código antigo embutido.
+* `assets/icon.ico` é gerado por `tools/gen_icon.py` (placeholder editável).
+* `assets/version_info.txt` alimenta as propriedades do arquivo (versão, produto, ícone).
+* Modo `--onefile` extrai para `%TEMP%` a cada inicialização (startup mais lento que `--onedir`). Para distribuição em pasta (startup instantâneo), troque a flag no `.bat`.
+* Exes não assinados podem disparar falso positivo em antivírus; assinatura de código resolve.
 
 ---
 

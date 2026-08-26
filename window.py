@@ -1,3 +1,4 @@
+from PySide6.QtCore import QSettings
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QTabWidget, QLabel, QApplication
 )
@@ -5,6 +6,8 @@ from theme import C, GLOBAL_QSS
 from config import CARD_CFG, TABS
 from widgets import StatCard, TabPage
 from utils import fmt
+
+BASE_KINDS = ("USER", "APPDATA")
 
 
 class Window(QMainWindow):
@@ -14,11 +17,13 @@ class Window(QMainWindow):
         self.resize(1100, 780)
         self.setMinimumSize(850, 600)
         self.setStyleSheet(GLOBAL_QSS)
+        self._settings = QSettings("THZ", "LimpezaJanelas")
         self._pages = {}
         self._cards = {}
         self._counts = {}
         self._totals = {}
         self._build()
+        self._restore_state()
         QApplication.processEvents()
 
     def _build(self):
@@ -47,8 +52,8 @@ class Window(QMainWindow):
             c.clicked.connect(self._on_card_clicked)
             self._cards[k] = c
             dash.addWidget(c)
-        # Card do total (não clicável)
-        self._card_total = StatCard("TOTAL", "📊", "Total Geral", "#107C10")
+        # Card do total (não clicável) — soma apenas categorias base, sem sobreposição
+        self._card_total = StatCard("TOTAL", "📊", "Total Base", "#107C10")
         dash.addWidget(self._card_total)
         lo.addLayout(dash)
 
@@ -62,7 +67,8 @@ class Window(QMainWindow):
 
         self._status = QLabel(
             "💡 Clique em qualquer card indicador no topo para alternar rapidamente entre abas. "
-            "Cada aba opera individualmente."
+            "Cada aba opera individualmente. F5 escaneia, Del envia selecionados à lixeira. "
+            "O Total Base soma apenas Perfil + AppData (demais abas são subconjuntos)."
         )
         self._status.setStyleSheet(f'color:{C["dim"]};font-size:11px;padding:2px 0;border:none')
         lo.addWidget(self._status)
@@ -76,6 +82,30 @@ class Window(QMainWindow):
                 self.tabs.setCurrentIndex(index)
                 break
 
+    def _restore_state(self):
+        try:
+            geo = self._settings.value("geometry")
+            if geo is not None:
+                self.restoreGeometry(geo)
+            idx = self._settings.value("tab", 0, type=int)
+            if 0 <= idx < self.tabs.count():
+                self.tabs.setCurrentIndex(idx)
+            for k, page in self._pages.items():
+                state = self._settings.value(f"header/{k}")
+                if state is not None:
+                    page.tree.header().restoreState(state)
+        except Exception:
+            pass
+
+    def _save_state(self):
+        try:
+            self._settings.setValue("geometry", self.saveGeometry())
+            self._settings.setValue("tab", self.tabs.currentIndex())
+            for k, page in self._pages.items():
+                self._settings.setValue(f"header/{k}", page.tree.header().saveState())
+        except Exception:
+            pass
+
     def _on_scan(self, kind, count, total):
         self._counts[kind] = count
         self._totals[kind] = total
@@ -83,9 +113,10 @@ class Window(QMainWindow):
         if c:
             c.set(f"{count} itens" if count else "0",
                   fmt(total) if total else "0 B")
-        # Totais acumulados por aba (sem re-varrer as árvores)
-        all_n = sum(self._counts.values())
-        all_sz = sum(self._totals.values())
+        # Total base: apenas Perfil + AppData (categorias não sobrepostas).
+        # CACHE/DEV/LOGS/DOWNLOADS/LARGE_OLD são subconjuntos dessas árvores.
+        all_n = sum(self._counts.get(k, 0) for k in BASE_KINDS)
+        all_sz = sum(self._totals.get(k, 0) for k in BASE_KINDS)
         self._card_total.set(fmt(all_sz) if all_sz else "0 B",
                              f"{all_n} itens")
 
@@ -93,7 +124,7 @@ class Window(QMainWindow):
         # Para todas as threads e timers em execução antes de fechar a janela
         self._status.setText("⏳ Finalizando tarefas de forma segura...")
         QApplication.processEvents()
-        
+
         for k, page in self._pages.items():
             try:
                 if page.worker and page.worker.isRunning():
@@ -101,12 +132,20 @@ class Window(QMainWindow):
                     page.worker.wait(2000) # Timeout evita travar o fechamento
             except Exception:
                 pass
-                
+
+            try:
+                if page._del_worker and page._del_worker.isRunning():
+                    page._del_worker.abort()
+                    page._del_worker.wait(2000)
+            except Exception:
+                pass
+
             try:
                 if page._timer:
                     page._timer.stop()
                     page._timer = None
             except Exception:
                 pass
-                
+
+        self._save_state()
         event.accept()

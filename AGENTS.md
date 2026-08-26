@@ -11,6 +11,7 @@ Cleaner do perfil Windows (`C:\Users\Lucas`) para remover lixo do sistema: pasta
 | Python 3 | 3.12+ | Runtime |
 | PySide6 | 6.11.1 | GUI (Qt for Python) |
 | send2trash | — | Envio seguro para Lixeira do Windows |
+| QSettings | PySide6 | Persistência de geometria da janela, aba ativa e larguras de coluna |
 | os.scandir | stdlib | Varredura performática de diretórios (stat-free IO) |
 | QThread | PySide6 | Threads independentes para scan sem travar UI |
 | threading / concurrent.futures | stdlib | Cálculo paralelo de tamanho de diretórios |
@@ -29,6 +30,12 @@ ThzLimpezaJanelas/
   workers.py     # ScanWorker (QThread) — varreduras em thread separada
   widgets.py     # StatCard, SizeWidgetItem, TabPage
   window.py      # Window (QMainWindow) — dashboard + abas + status
+  assets/        # icon.ico (gerado), icon_preview.png, version_info.txt
+  tools/         # gen_icon.py — gera o .ico placeholder via Pillow
+  build_pyinstaller.bat  # Empacota onefile windowed → dist\
+  build_nuitka.bat       # Compila onefile nativo → dist-nuitka\
+  requirements.txt       # Deps de runtime (PySide6, send2trash)
+  requirements-dev.txt   # Deps de build (pillow, pyinstaller, nuitka, zstandard)
   Iniciar.bat    # Atalho: python main.py
   AGENTS.md      # Este documento (contexto para novas conversas)
 ```
@@ -46,7 +53,11 @@ all users, default user, public, default
 ```
 
 ### `CACHE_PATTERNS` — `list[str]`
-Padrões de nome usados pelo scan dinâmico de cache (abrange nomes como `cache`, `temp`, `logs`, `crash`, `node_modules`, `__pycache__`, `.git`, etc.)
+Padrões de nome usados pelo scan dinâmico de cache. **Nunca incluir** padrões que destroem dados do usuário:
+- Sem `.git`/`.svn`/`.hg` (histórico de repositórios)
+- Sem `local storage`, `session storage`, `history`, `recent` (logins/dados de navegador)
+- Sem nomes genéricos de projeto: `env`, `.env`, `packages`, `installer`
+- Artefatos de build (`dist`, `build`, `out`, `target`, `.next`, etc.) ficam apenas em `DEV_PATTERNS`
 
 ### `KNOWN_CACHE` — `list[str]`
 Caminhos relativos à `AppData` com caches conhecidos de aplicativos:
@@ -111,9 +122,10 @@ Worker principal. Executa a varredura de acordo com `self.kind` em uma thread se
 | `done` | `Signal()` | Varredura concluída (ou cancelada) |
 
 #### Métodos
-- `__init__(kind: str)` — kind é um dos `"USER"`, `"APPDATA"`, `"EMPTY"`, `"CACHE"`, `"LARGE_OLD"`
+- `__init__(kind: str)` — kind é um dos `"USER"`, `"APPDATA"`, `"EMPTY"`, `"CACHE"`, `"LARGE_OLD"`, `"DEV"`, `"DOWNLOADS"`, `"LOGS"`
 - `abort()` — sinaliza cancelamento (thread-safe)
 - `_check()` — levanta `Cancelled` se `abort()` foi chamado
+- `_already_covered(path)` — dedup do scan CACHE: retorna `True` se o caminho (ou um ancestral) já foi emitido; caso contrário registra e retorna `False`. Usa `os.path.normcase(normpath())` para comparação case-insensitive no Windows
 
 #### Fluxo (`run()`)
 1. Dispara para o método específico baseado em `self.kind`
@@ -127,15 +139,34 @@ Worker principal. Executa a varredura de acordo com `self.kind` em uma thread se
 | `USER` | `_scan_root(HOME, skip_appdata=True)` | Top-level items do perfil |
 | `APPDATA` | `_scan_root(APPD, skip_appdata=False)` | Top-level items da AppData |
 | `EMPTY` | `_scan_empty()` | Caminha HOME + APPD com pilha, emite pastas sem filhos (vazias) |
-| `CACHE` | `_scan_cache()` | 1. Verifica `KNOWN_CACHE` (paths fixos); 2. `_find_caches()` dinâmico até depth 3 |
+| `CACHE` | `_scan_cache()` | 1. Verifica `KNOWN_CACHE` (paths fixos); 2. `_find_caches()` dinâmico até depth 3. Dedup via `_already_covered()` — evita contar `WER` + seus filhos e pares KNOWN∩dinâmico |
 | `LARGE_OLD` | `_scan_old()` | Caminha HOME, emite arquivos com `size >= BIG` e `mtime < CUTOFF` |
 
 #### Detalhes do `_scan_root`
 - Coleta entradas com `os.scandir`
 - Para cada diretório: calcula `dir_size` **sequencialmente** (evita thrashing de I/O com múltiplas threads concorrentes)
-- Para cada arquivo: emite `item(path, size, "")` diretamente
+- Para cada arquivo: emite `item(path, size, "")` diretamente — protegido por `try/except (PermissionError, OSError)` (um arquivo inacessível não aborta o scan)
 - Emite `progress(i+1, total)` no loop
 - `dir_size` recebe `self._check` para permitir cancelamento cooperativo
+
+---
+
+### `DeleteWorker(QThread)`
+Deleção assíncrona (lixeira ou permanente) para não congelar a UI. Usado pelo `TabPage`.
+
+#### Signals
+| Signal | Tipo | Descrição |
+|---|---|---|
+| `progress` | `Signal(int, int)` | `(done, total)` |
+| `done_phase` | `Signal(int, list)` | `(ok_count, failed_paths)` ao final da fase |
+
+#### Métodos
+- `__init__(paths: list, permanent: bool = False)`
+- `abort()` — interrompe no próximo item
+
+#### Comportamento
+- Fase normal: `send2trash.send2trash(p)` por item; falhas acumulam em `failed`
+- Fase permanente (`permanent=True`): `shutil.rmtree` / `os.remove`; se o path ainda existir após a tentativa, conta como falha
 
 ---
 
@@ -215,14 +246,35 @@ Uma aba completa com toolbar, barra de progresso, status e tree.
 #### Métodos
 | Método | Descrição |
 |---|---|
-| `start()` | Inicia scan (se worker já rodando, ignora) |
+| `start()` | Inicia scan (se ocupado, ignora) |
 | `_toggle_item(item, column)` | Alterna checkbox se `column > 0` (conectado a `itemClicked`) |
-| `_cancel()` | Chama `worker.abort()` |
-| `_sel_all()` | Marca checkbox de todos os itens |
-| `_desel_all()` | Desmarca checkbox de todos |
-| `_delete()` | Coleta itens marcados, confirma, envia para lixeira, reinicia scan |
-| `_done()` | Esconde progresso, atualiza label, emite `scanned` |
-| `_enable(busy)` | Habilita/desabilita botões conforme estado de scan |
+| `_cancel()` | Aborta `DeleteWorker` se rodando; senão `worker.abort()` |
+| `_sel_all()` / `_desel_all()` | Marca/desmarca todos (com `blockSignals` + 1 update do contador) |
+| `_apply_filter(text)` | Oculta itens cujo path não contém o texto (case-insensitive) |
+| `_has_checked()` / `_delete_checked()` | Suporte ao atalho Del (silencioso quando nada marcado) |
+| `_update_sel_info()` | Atualiza contador ao vivo "☑ N selecionado(s) \| tamanho" (usa bytes brutos) |
+| `_delete()` | Coleta marcados, confirma, delega fases para `DeleteWorker` |
+| `_start_delete_phase(paths, permanent)` | Inicia fase de deleção com progresso determinado |
+| `_after_delete_phase(ok, failed, permanent)` | Oferece exclusão permanente para falhas da lixeira; exibe resumo final |
+| `_delete_single_item(item)` | Deleção via menu de contexto, também via `DeleteWorker` |
+| `_done()` | Esconde progresso, ordena por tamanho, emite `scanned` (total = bytes brutos) |
+| `_recalc_and_emit()` | Recalcula total com `data(1, Qt.UserRole)` e reemite `scanned` |
+| `_enable(busy)` | Habilita/desabilita botões conforme estado (scan **ou** deleção) |
+
+#### Toolbar
+- Botões: Escanear / Cancelar / Selecionar / Desmarcar / Lixeira (como antes)
+- `sel_lbl` — contador ao vivo de itens marcados + tamanho somado
+- `filter` (`QLineEdit`) — filtro incremental por nome/path
+
+#### Atalhos de teclado
+| Tecla | Ação |
+|---|---|
+| `F5` | Escanear aba ativa |
+| `Ctrl+A` (no tree) | Marcar todos |
+| `Del` (no tree) | Enviar marcados à lixeira (sem popup se nada marcado) |
+
+#### Totais precisos
+O tamanho bruto em bytes fica em `item.data(1, Qt.UserRole)`. Totais (`_done`, `_recalc_and_emit`, `_delete`) somam esse valor — nunca re-parsear o texto formatado da coluna Tamanho.
 
 #### Botões
 | Botão | Estilo | Função |
@@ -262,11 +314,15 @@ Janela principal contendo dashboard + abas.
 ```
 
 #### Cards do Dashboard
-6 `StatCard` em linha: USER, APPDATA, EMPTY, CACHE, LARGE_OLD, TOTAL GERAL (verde).
-Atualizados via `_on_scan(kind, count, total)`.
+8 `StatCard` em linha: USER, APPDATA, EMPTY, CACHE, LARGE_OLD, DEV, DOWNLOADS, LOGS + TOTAL BASE (verde, não clicável).
+Atualizados via `_on_scan(kind, count, total)`. O **Total Base** soma apenas USER + APPDATA (`BASE_KINDS`) — as demais abas são subconjuntos dessas árvores e somar tudo inflaria o número.
+
+#### Persistência (QSettings — "THZ", "LimpezaJanelas")
+- `_restore_state()` no `__init__`: geometria da janela, aba ativa e header state por aba (`header/<kind>`)
+- `_save_state()` no `closeEvent`
 
 #### Abas
-5 `TabPage` em `QTabWidget`, cada uma com scan independente e concorrente.
+8 `TabPage` em `QTabWidget`, cada uma com scan independente e concorrente.
 
 ---
 
@@ -347,6 +403,34 @@ pip install PySide6 send2trash
 
 ---
 
+## Empacotamento (.exe standalone)
+
+| Script | Ferramenta | Saída | Observações |
+|---|---|---|---|
+| `build_pyinstaller.bat` | PyInstaller 6.x (`--onefile --windowed`) | `dist\ThzLimpezaJanelas.exe` (~46 MB) | Build ~60s; extrai p/ `%TEMP%\_MEIxxx` a cada execução |
+| `build_nuitka.bat` | Nuitka 4.x (`--onefile`, plugin pyside6) | `dist-nuitka\ThzLimpezaJanelas.exe` (~22 MB) | Compila Python→C; 1º build baixa MinGW64; builds em minutos |
+
+Deps de build: `requirements-dev.txt` (pillow, pyinstaller, nuitka, zstandard).
+
+### Recursos embutidos
+- `assets/icon.ico` — gerado por `tools/gen_icon.py` (Pillow, multi-resolução 256→16px)
+- `assets/version_info.txt` — recurso de versão Windows (Produto, versão, copyright AGPL)
+
+### Regra crítica: purge de `__pycache__` antes do build
+Ambos os `.bat` removem `__pycache__` antes de empacotar. **Motivo real**: o PyInstaller pode embutir bytecode obsoleto do cache — já produziu um exe com uma versão antiga de `widgets.py` (sem `_apply_filter`) crashando com `AttributeError` na inicialização. Sintoma típico: funciona via `python main.py` mas o exe crasha com line numbers que não batem com o source. Diagnóstico feito inspecionando o PYZ:
+```python
+from PyInstaller.archive.readers import CArchiveReader, ZlibArchiveReader
+r = CArchiveReader("dist\\app.exe"); data = r.extract("PYZ.pyz")
+# gravar data em arquivo .pyz e abrir com ZlibArchiveReader → z.extract("widgets") → code object
+```
+
+### Estado da validação (22/08/2026)
+- Ambos os exes **funcionam** quando rodam (janela abre, app estável, fecha limpo).
+- Máquina de build estava com malware ativo (`Virus:Win32/Grenam.VA!MSR`, file infector) → falhas intermitentes de exit 1 durante a extração onefile + startups de 30-120s. **Re-benchmarkar tamanho/startup após limpeza do sistema.** Startup medido não é confiável.
+- Falso positivo de AV em exe não assinado é esperado; assinatura de código resolve.
+
+---
+
 ## Performance
 
 ### I/O
@@ -374,6 +458,12 @@ pip install PySide6 send2trash
 | Classe `_SizeWorker` (paralela) referida na doc | Doc registrava worker que não existe mais | `dir_size` é sequencial; remover menções a `_SizeWorker` |
 | Checkbox invisível (branco sobre branco) | Nenhum estilo visual no indicador | `QTreeWidget::indicator:checked` com fundo azul + `:unchecked` com borda cinza |
 | Seleção "confusa" — clique no texto não marca | `itemClicked` não conectado | `_toggle_item()` — clique em col 1+ alterna checkbox; col 0 deixa nativo do Qt |
+| Cache contado 2-3x (WER + filhos; KNOWN ∩ dinâmico) | `KNOWN_CACHE` listava `WER` e `WER\ReportQueue`/`ReportArchive`; `_find_caches` reemitia paths do KNOWN_CACHE | `_already_covered()` — conjunto de paths normalizados; pula path coberto por ancestral já emitido |
+| Totais imprecisos (erro de arredondamento acumulado) | Total via `parse_size(texto formatado)` após `fmt()` arredondar para 2 casas | Bytes brutos em `item.data(1, Qt.UserRole)`; totais somam o valor bruto |
+| Scan USER/APPDATA abortava no meio | `e.stat().st_size` sem proteção — um PermissionError interrompia o loop | Loop envolto em `try/except (PermissionError, OSError)` |
+| UI congelava ("Não respondendo") ao deletar | `send2trash`/`shutil.rmtree` rodavam na main thread | `DeleteWorker(QThread)` assíncrono com barra de progresso e Cancelar |
+| Padrões perigosos nas listas de limpeza | `.git`, `local storage`, `history`, `env`, `packages` etc. casavam dados do usuário | Removidos de `CACHE_PATTERNS`/`DEV_PATTERNS`; ver regras na seção `CACHE_PATTERNS` |
+| "Total Geral" inflado | Somava categorias sobrepostas (mesma pasta em CACHE, DEV e LOGS) | Card renomeado **Total Base** = USER + APPDATA (`BASE_KINDS`) |
 
 ---
 
